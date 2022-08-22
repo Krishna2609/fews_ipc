@@ -1,0 +1,217 @@
+########################
+# 
+# FEWS NET Data processing
+# Date: November 2017
+#
+# Purpose: This Python script is used to process FEWS NET food security data
+# The user is required to specify an indir (directory where original data are stored),
+# a shp_file (the full path to the shapefile of the country of interest), an mxd
+# (the map document with the desired map template) and a symbology layer (a .lyr
+# file with the symbology to be used in the maps).
+# An optional admin input is set according to the administrative division used.
+# The programme will create two subdirectories where intermediate files will be stored.
+# A statistics subdirectory with data showing the difference between outlook and current
+# data is also created. The end result is a shapefile with the difference between the two.
+# In addition, maps showing the results of the calculations are also created and stored in the
+# maps sub-directory.
+#
+# Author: Krishna Krishnamurthy
+#
+########################
+
+
+#------------------- User input -------------------#
+
+# Workspace, country or region of interest, map document, symbology
+indir = r"E:\Krishnamurthy_K_Final\fews_data"
+country = r"E:\Krishnamurthy_K_Final\ETH_adm_shp\ETH_adm3.shp"
+mxd = r"E:\Krishnamurthy_K_Final\Krishnamurthy_K_Final.mxd"
+symbology = r'E:\Krishnamurthy_K_Final\fews_data\symbology.lyr'
+admin = "NAME 3"
+
+#------------------- Importing modules -------------------#
+
+print "Importing modules..."
+
+import arcpy, fnmatch, os, shutil
+from arcpy.sa import *
+
+#------------------- Data management -------------------#
+
+print "Creating directories..."
+# Subdirectories where data will be stored
+cs_dir, ml_dir, stats_dir, maps_dir = \
+        indir+'\current_data', indir+'\outlook_data', \
+        indir+'\stats', indir+'\maps'
+
+# Ensuring that directories do not currently exist and then creating directories
+# List of directories
+dir_list = [cs_dir, ml_dir, stats_dir, maps_dir]
+for i in dir_list:
+    # Removing directories if they exist, to prevent data errors
+    if os.path.exists(i):
+        shutil.rmtree(i)
+    # Making new directories
+    os.makedirs(i)
+
+# Print statement letting user know how many seasons (shapefiles there are)
+print "You wll be analyzing " +\
+      str(len(fnmatch.filter(os.listdir(indir), '*cs.shp'))) + " seasons" + "\n"
+
+#------------------- Setting arcpy workspace -------------------#
+
+arcpy.env.workspace = indir
+
+#------------------- Rasterizing shapefiles -------------------#
+
+# Creating a list for the shapefiles
+files = os.listdir(indir)
+current_list = [ff for ff in files if ff.endswith('CS.shp')]
+outlook_list = [ff for ff in files if ff.endswith('ML2.shp')]
+
+# Rasterizing current situation
+print "Rasterizing current situation data..."
+
+for polygon in current_list:
+    arcpy.PolygonToRaster_conversion(in_features = indir+'\\'+polygon,\
+    value_field = "CS",\
+    out_rasterdataset = cs_dir+'\\'+os.path.splitext(os.path.basename(polygon))[0]+'.tif')
+    
+print "Finished rasterizing current situation data"
+
+# Rasterizing outlook data
+print "Rasterizing outlook data..."
+
+for polygon in outlook_list:
+    arcpy.PolygonToRaster_conversion(in_features = indir+'\\'+polygon,\
+    value_field = "ML2",\
+    out_rasterdataset = ml_dir+'\\'+os.path.splitext(os.path.basename(polygon))[0]+'.tif')
+
+print "Finished rasterizing outlook data"
+
+#------------------- Checking out extensions -------------------#
+
+# Checking whether Spatial Analyst extension is available.
+# Spatial Analyst is necessary for the calculation of differences and zonal statistics.
+if arcpy.CheckExtension("Spatial") == "Available":
+    print "Spatial Analyst is available"
+    if arcpy.CheckOutExtension("Spatial") == "CheckedOut":
+        print "Spatial analyst extension checked out. You can now use the license"
+    else:
+        print "Spatial Analyst cannot be checked out."
+# If Spatial Analyst is not available, print a statement letting the user know
+# that some of the functions will not work.
+else:
+    print "Spatial Analyst is unavailable. Some of the functions in this script may not work."
+
+#------------------- Calculating difference (accuracy) -------------------#
+
+print "Calculating difference between outlook and current situation..."
+
+# Creating lists of current and outlook data
+cs = os.listdir(cs_dir)
+cs_rasters = [ff for ff in cs if ff.endswith('CS.tif')]
+
+ml = os.listdir(ml_dir)
+ml_rasters = [ff for ff in ml if ff.endswith('ML2.tif')]
+
+# Calculating difference in rasters between the outlook and current data
+if arcpy.CheckOutExtension("Spatial") == "CheckedOut":
+    for i in range(0, len(cs_rasters)):
+        raster = Raster(os.path.join(ml_dir,ml_rasters[i])) - \
+             Raster(os.path.join(cs_dir,cs_rasters[i]))
+        rasterOut = stats_dir+'\\'+os.path.splitext(os.path.basename(cs_rasters[i]))[0]+\
+                '_dif.tif'
+        raster.save(rasterOut)
+    print "Finished calculating differences."
+else:
+    print "Spatial Analyst is not available. Cannot calculate difference."
+    
+#------------------- Calculating zonal statistics -------------------#
+
+# Creating a list with the rasters to be used for zonal statistics
+stats = os.listdir(stats_dir)
+stats_rasters = [ff for ff in stats if ff.endswith('dif.tif')]
+
+
+# Copying shapefile so original data is not affected 
+arcpy.CopyFeatures_management(country, indir+'\ETH_adm3_copy.shp')
+country = indir+'\ETH_adm3_copy.shp'
+
+# Defining table to store zonal statistics
+out_table = stats_dir+"\zonal_stats"
+
+# Changing workspace to allow ArcPy to recognize rasters of interest
+arcpy.env.workspace = stats_dir
+
+# Ensuring that Spatial Analyst license is available
+if arcpy.CheckOutExtension("Spatial") == "CheckedOut":
+    print "Calculating zonal statistics..."
+    for raster in stats_rasters:
+        # Defining Zonal Statistics parameters
+        outZSAT = ZonalStatisticsAsTable(country, admin, raster, out_table, "DATA", "MAJORITY")
+        # Create a new field with a more legible title
+        field_name = os.path.splitext(os.path.basename(raster))[0]
+        arcpy.AddField_management(out_table, field_name, "LONG")
+        arcpy.CalculateField_management(out_table, field_name, "!MAJORITY!", "PYTHON_9.3")
+        # Join table
+        arcpy.JoinField_management(country, admin, out_table, admin, field_name)
+        # Delete table so it can be created again in the loop
+        arcpy.Delete_management(out_table)
+    print "Finished calculating zonal statistics."
+        
+# If Spatial Analyst is not available, print error statement
+else:
+    print "Spatial Analyst license is unavailable. Cannot calculate zonal statistics!"
+
+#------------------- Checking in extensions -------------------#
+
+# Spatial Analyst license is no longer needed
+if arcpy.CheckExtension("Spatial") == "Available":
+    arcpy.CheckInExtension("Spatial")
+    print "Spatial Analyst license is now checked in."
+
+#------------------- Automatic mapping -------------------#
+
+print "Creating maps..."
+
+# Defining mxd
+mxd = arcpy.mapping.MapDocument(mxd)
+
+# Defining layer and title elements
+layer = arcpy.mapping.ListLayers(mxd)[0]
+title = arcpy.mapping.ListLayoutElements(mxd, "TEXT_ELEMENT")[0]
+
+# Defining a field list that the loop will iterate over
+fields = [field.name for field in arcpy.ListFields(country) if field.name <> 'temp']
+# We are only interested in the fields after column 17
+fields = fields[17:len(fields)]
+# Adding a temporary field to be populated
+arcpy.AddField_management(layer, 'temp', "LONG")
+
+# Mapping
+for field in fields:
+    # Calculate field to update 'temp' field
+    arcpy.CalculateField_management(layer, 'temp', "!{0}!".format(field), "PYTHON_9.3")
+    # Applying symbology
+    arcpy.ApplySymbologyFromLayer_management(layer, symbology)
+    # Updating title
+    title.text = field
+    # Refreshing table of contents
+    arcpy.RefreshActiveView()
+    # Exporting to PNG
+    arcpy.mapping.ExportToPNG(mxd, os.path.join(maps_dir, "{0}.png".format(field)))
+arcpy.DeleteField_management(layer, 'temp')
+
+print "Finished creating maps."
+    
+#------------------- Removing locks -------------------#
+
+del mxd, indir, country, cs_dir, ml_dir, stats_dir, maps_dir, dir_list,\
+    files, field, fields, layer, title, current_list, outlook_list
+
+#------------------- End -------------------#
+print "Analysis complete. Your data and maps are ready in the respective directories."
+
+
+
